@@ -68,7 +68,6 @@ schema = StructType([
     StructField("duration", IntegerType())
 ])
 
-# Kafka source
 df = spark.readStream \
     .format("kafka") \
     .option("kafka.bootstrap.servers", "kafka:9092") \
@@ -76,12 +75,15 @@ df = spark.readStream \
     .option("startingOffsets", "latest") \
     .load()
 
-# parse JSON
 json_df = df.selectExpr("CAST(value AS STRING)") \
     .select(from_json(col("value"), schema).alias("data")) \
     .select("data.*")
 
-# aggregation
+json_df = json_df.withColumn(
+    "timestamp",
+    to_timestamp("timestamp")
+)
+
 agg = json_df.groupBy(
     window(col("timestamp"), "10 seconds"),
     col("operator")
@@ -90,10 +92,26 @@ agg = json_df.groupBy(
     count("*").alias("events")
 )
 
-query = agg.writeStream \
-    .outputMode("complete") \
-    .format("console") \
-    .option("truncate", False) \
+final_df = agg.select(
+    col("window.start").alias("window_start"),
+    col("window.end").alias("window_end"),
+    col("operator"),
+    col("total_bytes"),
+    col("events")
+)
+
+def write_to_clickhouse(df, epoch_id):
+    df.write \
+        .format("jdbc") \
+        .option("url", "jdbc:clickhouse://clickhouse:8123/default") \
+        .option("dbtable", "telecom_agg") \
+        .option("driver", "com.clickhouse.jdbc.ClickHouseDriver") \
+        .mode("append") \
+        .save()
+
+query = final_df.writeStream \
+    .foreachBatch(write_to_clickhouse) \
+    .outputMode("update") \
     .start()
 
 >>>>>>> aaa07d8 (added spark_stream.py)
